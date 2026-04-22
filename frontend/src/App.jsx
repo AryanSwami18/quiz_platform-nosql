@@ -4,9 +4,14 @@ import './index.css';
 const API_BASE = 'http://localhost:3000/quiz';
 
 function App() {
-  const [view, setView] = useState('start'); // start, quiz, results
+  const [view, setView] = useState('start'); // start, quiz, results, faculty-dash, faculty-build
   const [studentId, setStudentId] = useState('');
   const [studentName, setStudentName] = useState('');
+  
+  // Faculty State
+  const [facultyQuizId, setFacultyQuizId] = useState(null);
+  const [questionType, setQuestionType] = useState('MCQ');
+  const [questionForm, setQuestionForm] = useState({ text: '', difficulty: 'medium', subject: '', correctOption: 0, isTrue: true });
   
   const [quizInfo, setQuizInfo] = useState(null); // { id, title, duration_minutes }
   const [session, setSession] = useState(null); // { sessionId, questions }
@@ -42,28 +47,27 @@ function App() {
     return () => clearTimeout(timerRef.current);
   }, [timeLeft, view]);
 
-  // Leaderboard polling
+  // Leaderboard SSE Connection
   useEffect(() => {
-    if (view === 'quiz') {
-      lbIntervalRef.current = setInterval(fetchLeaderboard, 3000); // Poll every 3s
+    let eventSource = null;
+    if (view === 'quiz' && quizInfo && studentId) {
+      eventSource = new EventSource(`http://localhost:3000/stream/${quizInfo.id}/leaderboard?student_id=${studentId}`);
+      
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'UPDATE' && data.payload && !data.payload.error) {
+            setLeaderboard(data.payload);
+          }
+        } catch (err) {
+          console.error("SSE Parse Error:", err);
+        }
+      };
     }
-    return () => clearInterval(lbIntervalRef.current);
-  }, [view, studentId]);
-
-  const fetchLeaderboard = async () => {
-    if (!quizInfo) return;
-    try {
-      const res = await fetch(`${API_BASE}/${quizInfo.id}/leaderboard?student_id=${studentId}`);
-      const data = await res.json();
-      if (!data.error && data.top10) {
-        setLeaderboard(data);
-      } else {
-        console.error('Leaderboard API returned error:', data.error);
-      }
-    } catch (err) {
-      console.error('Leaderboard error', err);
-    }
-  };
+    return () => {
+      if (eventSource) eventSource.close();
+    };
+  }, [view, quizInfo, studentId]);
 
   const handleStart = async (e) => {
     e.preventDefault();
@@ -87,7 +91,7 @@ function App() {
       });
       setTimeLeft(data.duration_minutes * 60);
       setView('quiz');
-      fetchLeaderboard();
+      // SSE connection will automatically initialize on view change
     } catch (err) {
       setError(err.message);
     } finally {
@@ -114,11 +118,8 @@ function App() {
       const data = await res.json();
       if (!res.ok) {
         console.warn('Answer error:', data.error);
-        // Might already be answered (SET NX locked)
-      } else {
-        // Fetch leaderboard instantly to show updated score/rank
-        fetchLeaderboard();
       }
+      // SSE will automatically push the updated leaderboard if the answer was correct
     } catch (err) {
       console.error(err);
     }
@@ -185,10 +186,18 @@ function App() {
             <button 
               type="submit" 
               className="btn-primary" 
-              style={{ width: '100%' }}
+              style={{ width: '100%', marginBottom: '1rem' }}
               disabled={loading || !quizInfo}
             >
               {loading ? <div className="loader" style={{ width: '20px', height: '20px', margin: 0, borderWidth: '2px' }} /> : 'Start Quiz'}
+            </button>
+            <button 
+              type="button" 
+              className="btn-secondary" 
+              style={{ width: '100%', border: 'none', color: 'var(--text-muted)' }}
+              onClick={() => setView('faculty-dash')}
+            >
+              Faculty Access →
             </button>
           </form>
         </div>
@@ -360,6 +369,171 @@ function App() {
           <div style={{ textAlign: 'center' }}>
             <button className="btn-secondary" onClick={() => window.location.reload()}>Back to Start</button>
           </div>
+        </div>
+      </div>
+    );
+  }
+
+  // --- FACULTY VIEWS ---
+  if (view === 'faculty-dash') {
+    const handleCreateQuiz = async (e) => {
+      e.preventDefault();
+      setLoading(true);
+      try {
+        const title = e.target.title.value;
+        const duration = e.target.duration.value;
+        const res = await fetch(`${API_BASE}/../faculty/quiz`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title, duration_minutes: duration })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error);
+        setFacultyQuizId(data.quizId);
+        setView('faculty-build');
+      } catch (err) {
+        alert(err.message);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    return (
+      <div className="app-container" style={{ justifyContent: 'center', alignItems: 'center' }}>
+        <div className="glass-panel" style={{ maxWidth: '500px', width: '100%' }}>
+          <h2 style={{ textAlign: 'center', color: 'var(--accent-secondary)' }}>Faculty Dashboard</h2>
+          <p style={{ textAlign: 'center', color: 'var(--text-muted)', marginBottom: '2rem' }}>Create a new Question Bank</p>
+          
+          <form onSubmit={handleCreateQuiz}>
+            <label>Quiz Title</label>
+            <input className="input-field" name="title" required placeholder="e.g. Midterm Exam" />
+            
+            <label>Duration (Minutes)</label>
+            <input className="input-field" type="number" name="duration" required placeholder="e.g. 60" />
+            
+            <button type="submit" className="btn-primary" style={{ width: '100%' }} disabled={loading}>
+              Create Quiz Frame
+            </button>
+          </form>
+          <button className="btn-secondary" style={{ width: '100%', marginTop: '1rem', border: 'none' }} onClick={() => setView('start')}>
+            ← Back to Student View
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (view === 'faculty-build') {
+    const handleAddQuestion = async (e) => {
+      e.preventDefault();
+      setLoading(true);
+      
+      const payload = {
+        question_text: questionForm.text,
+        type: questionType,
+        difficulty: questionForm.difficulty,
+        subject: questionForm.subject,
+      };
+
+      if (questionType === 'MCQ') {
+        payload.options = [e.target.opt0.value, e.target.opt1.value, e.target.opt2.value, e.target.opt3.value];
+        payload.correct_option = questionForm.correctOption;
+      } else if (questionType === 'TRUE_FALSE') {
+        payload.is_true = questionForm.isTrue;
+      } else if (questionType === 'CODING') {
+        payload.language = 'javascript';
+        payload.test_cases = [{ input: e.target.tc_in.value, expected_output: e.target.tc_out.value }];
+      }
+
+      try {
+        const res = await fetch(`${API_BASE}/../faculty/quiz/${facultyQuizId}/question`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error('Failed to add');
+        alert('Question added successfully!');
+        e.target.reset();
+        setQuestionForm({ ...questionForm, text: '' });
+      } catch (err) {
+        alert(err.message);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    const handlePublish = async () => {
+      try {
+        await fetch(`${API_BASE}/../faculty/quiz/${facultyQuizId}/publish`, { method: 'POST' });
+        alert('Quiz published! It is now live for students.');
+        window.location.reload();
+      } catch(err) {
+        alert('Error publishing');
+      }
+    }
+
+    return (
+      <div className="app-container" style={{ alignItems: 'center' }}>
+        <div className="glass-panel" style={{ maxWidth: '700px', width: '100%' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
+            <h2 style={{ margin: 0, color: 'var(--accent-secondary)' }}>Add Questions</h2>
+            <button className="btn-primary" onClick={handlePublish}>🚀 Publish Quiz</button>
+          </div>
+          
+          <div style={{ display: 'flex', gap: '1rem', marginBottom: '2rem' }}>
+            {['MCQ', 'TRUE_FALSE', 'CODING'].map(t => (
+              <button key={t} className={questionType === t ? 'btn-primary' : 'btn-secondary'} onClick={() => setQuestionType(t)}>
+                {t}
+              </button>
+            ))}
+          </div>
+
+          <form onSubmit={handleAddQuestion}>
+            <textarea className="input-field" rows="3" placeholder="Question Text..." required value={questionForm.text} onChange={e => setQuestionForm({...questionForm, text: e.target.value})} />
+            
+            <div style={{ display: 'flex', gap: '1rem' }}>
+              <input className="input-field" placeholder="Subject (e.g. React)" required value={questionForm.subject} onChange={e => setQuestionForm({...questionForm, subject: e.target.value})} />
+              <select className="input-field" value={questionForm.difficulty} onChange={e => setQuestionForm({...questionForm, difficulty: e.target.value})}>
+                <option value="easy">Easy</option>
+                <option value="medium">Medium</option>
+                <option value="hard">Hard</option>
+              </select>
+            </div>
+
+            {questionType === 'MCQ' && (
+              <div style={{ padding: '1rem', background: 'rgba(0,0,0,0.2)', borderRadius: '12px', marginBottom: '1.5rem' }}>
+                <p style={{ marginBottom: '1rem', color: 'var(--text-secondary)' }}>Options (Select radio for correct answer)</p>
+                {[0, 1, 2, 3].map(i => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '0.5rem' }}>
+                    <input type="radio" name="correctOpt" checked={questionForm.correctOption === i} onChange={() => setQuestionForm({...questionForm, correctOption: i})} />
+                    <input className="input-field" style={{ margin: 0 }} name={`opt${i}`} placeholder={`Option ${i+1}`} required />
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {questionType === 'TRUE_FALSE' && (
+              <div style={{ display: 'flex', gap: '2rem', padding: '1rem', marginBottom: '1.5rem' }}>
+                <label style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', cursor: 'pointer' }}>
+                  <input type="radio" name="tf" checked={questionForm.isTrue === true} onChange={() => setQuestionForm({...questionForm, isTrue: true})} /> True
+                </label>
+                <label style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', cursor: 'pointer' }}>
+                  <input type="radio" name="tf" checked={questionForm.isTrue === false} onChange={() => setQuestionForm({...questionForm, isTrue: false})} /> False
+                </label>
+              </div>
+            )}
+
+            {questionType === 'CODING' && (
+              <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem' }}>
+                <input className="input-field" name="tc_in" placeholder="Test Input (e.g. '1, 2')" required />
+                <input className="input-field" name="tc_out" placeholder="Expected Output (e.g. '3')" required />
+              </div>
+            )}
+
+            <button type="submit" className="btn-secondary" style={{ width: '100%' }} disabled={loading}>
+              + Add to Question Bank
+            </button>
+          </form>
         </div>
       </div>
     );

@@ -5,6 +5,8 @@ import { connectRedis } from './db/redis.js';
 import dotenv from 'dotenv';
 import analyticsRouter from './routes/analytics.js';
 import quizRouter from './routes/quiz.js';
+import streamRouter from './routes/stream.js';
+import facultyRouter from './routes/faculty.js';
 
 dotenv.config();
 
@@ -38,6 +40,9 @@ async function connectMongo() {
 // ============================================
 
 app.use('/analytics', analyticsRouter);
+app.use('/quiz', quizRouter);
+app.use('/stream', streamRouter);
+app.use('/faculty', facultyRouter);
 
 app.get('/', (req, res) => {
   res.send('API is working');

@@ -3,6 +3,7 @@ import { MongoClient, ObjectId } from 'mongodb';
 import { initSession, getSession, updateSessionAnswer, deleteSession } from '../redis/session.js';
 import { incrementScore, getLeaderboard } from '../redis/leaderboard.js';
 import { lockAnswer, unlockAnswer } from '../redis/answers.js';
+import { quizEmitter, EVENTS } from '../utils/emitter.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -67,6 +68,9 @@ router.post('/:id/start', async (req, res) => {
             questions: questions.map(stripAnswers)
         });
 
+        // Emit leaderboard update to trigger initial 0 points display for connected clients
+        quizEmitter.emit(EVENTS.LEADERBOARD_UPDATE, quizId);
+
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -124,6 +128,11 @@ router.post('/:id/answer', async (req, res) => {
         // Update session
         const answerData = { answer, is_correct: isCorrect, points_earned: pointsEarned };
         await updateSessionAnswer(quizId, studentId, questionId, answerData, pointsEarned);
+
+        // Broadcast to all SSE clients that this quiz's leaderboard has changed!
+        if (isCorrect) {
+            quizEmitter.emit(EVENTS.LEADERBOARD_UPDATE, quizId);
+        }
 
         const currentLeaderboard = await getLeaderboard(quizId, studentId);
 
