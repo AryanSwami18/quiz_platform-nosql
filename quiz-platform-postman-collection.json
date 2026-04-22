@@ -1,0 +1,162 @@
+{
+  "info": {
+    "name": "Quiz Platform API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Get Active Quiz",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:3000/quiz/active",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["quiz", "active"]
+        }
+      }
+    },
+    {
+      "name": "2. Start Quiz",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"studentId\": \"postman_student_1\",\n    \"studentName\": \"Postman Tester\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:3000/quiz/{{quiz_id}}/start",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["quiz", "{{quiz_id}}", "start"]
+        },
+        "description": "Replace {{quiz_id}} with the ID returned from the first request."
+      }
+    },
+    {
+      "name": "3. Submit Answer",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"studentId\": \"postman_student_1\",\n    \"questionId\": \"{{question_id}}\",\n    \"answer\": 1\n}"
+        },
+        "url": {
+          "raw": "http://localhost:3000/quiz/{{quiz_id}}/answer",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["quiz", "{{quiz_id}}", "answer"]
+        },
+        "description": "Replace {{question_id}} with an ID returned in the start quiz response. Answer is an index for MCQs (e.g. 1)."
+      }
+    },
+    {
+      "name": "4. Get Leaderboard",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:3000/quiz/{{quiz_id}}/leaderboard?student_id=postman_student_1",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["quiz", "{{quiz_id}}", "leaderboard"],
+          "query": [
+            {
+              "key": "student_id",
+              "value": "postman_student_1"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "5. Final Submit Quiz",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"studentId\": \"postman_student_1\",\n    \"studentName\": \"Postman Tester\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:3000/quiz/{{quiz_id}}/submit",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["quiz", "{{quiz_id}}", "submit"]
+        }
+      }
+    },
+    {
+      "name": "6. Get Results",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:3000/quiz/{{quiz_id}}/results?attempt_id={{attempt_id}}",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["quiz", "{{quiz_id}}", "results"],
+          "query": [
+            {
+              "key": "attempt_id",
+              "value": "{{attempt_id}}"
+            }
+          ]
+        },
+        "description": "Replace {{attempt_id}} with the attempt_id returned from the Submit request."
+      }
+    },
+    {
+      "name": "Analytics: Top Students",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:3000/analytics/top-students",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["analytics", "top-students"]
+        }
+      }
+    },
+    {
+      "name": "Analytics: Difficulty Analysis",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:3000/analytics/difficulty-analysis",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["analytics", "difficulty-analysis"]
+        }
+      }
+    }
+  ]
+}
