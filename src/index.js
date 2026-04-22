@@ -1,8 +1,10 @@
 import express from 'express';
 import cors from 'cors';
 import { MongoClient } from 'mongodb';
-import redis from 'redis';
+import { connectRedis } from './db/redis.js';
 import dotenv from 'dotenv';
+import analyticsRouter from './routes/analytics.js';
+import quizRouter from './routes/quiz.js';
 
 dotenv.config();
 
@@ -29,25 +31,13 @@ async function connectMongo() {
   }
 }
 
-// Redis connection
-const redisClient = redis.createClient({
-  url: process.env.REDIS_URL || `redis://${process.env.REDIS_HOST || 'redis'}:${process.env.REDIS_PORT || 6379}`
-});
-
-redisClient.on('connect', () => {
-  console.log('✓ Redis connected');
-});
-
-redisClient.on('error', (err) => {
-  console.error('✗ Redis connection failed:', err);
-  process.exit(1);
-});
-
-redisClient.connect();
+// Redis connection is handled in src/db/redis.js
 
 // ============================================
 // PLACEHOLDER ROUTES
 // ============================================
+
+app.use('/analytics', analyticsRouter);
 
 app.get('/', (req, res) => {
   res.send('API is working');
@@ -65,56 +55,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Quiz start (stub)
-app.post('/quiz/:id/start', async (req, res) => {
-  // TODO: Implement Quiz Start
-  // - Create Redis session with TTL
-  // - Return sessionId and duration
-  res.json({ message: 'POST /quiz/:id/start - Not implemented yet' });
-});
-
-// Submit answer (stub)
-app.post('/quiz/:id/answer', async (req, res) => {
-  // TODO: Implement Answer Submission
-  // - Validate answer via Redis SET NX (spam prevention)
-  // - Store in Redis session
-  // - Calculate score
-  // - Update leaderboard
-  res.json({ message: 'POST /quiz/:id/answer - Not implemented yet' });
-});
-
-// Get live leaderboard (stub)
-app.get('/quiz/:id/leaderboard', async (req, res) => {
-  // TODO: Implement Leaderboard
-  // - Read Redis Sorted Set
-  // - Return top 10 with current user rank
-  res.json({ message: 'GET /quiz/:id/leaderboard - Not implemented yet' });
-});
-
-// Submit quiz (stub)
-app.post('/quiz/:id/submit', async (req, res) => {
-  // TODO: Implement Quiz Submit
-  // - Read Redis answers
-  // - Persist to MongoDB
-  // - Clean up Redis keys
-  res.json({ message: 'POST /quiz/:id/submit - Not implemented yet' });
-});
-
-// Get results (stub)
-app.get('/quiz/:id/results', async (req, res) => {
-  // TODO: Implement Results
-  // - Query MongoDB quiz_attempts
-  // - Return score breakdown, correct answers, rank
-  res.json({ message: 'GET /quiz/:id/results - Not implemented yet' });
-});
-
-// Get questions (stub)
-app.get('/quiz/:id/questions', async (req, res) => {
-  // TODO: Implement Questions Fetch
-  // - Query MongoDB questions collection
-  // - Filter by quiz_id
-  res.json({ message: 'GET /quiz/:id/questions - Not implemented yet' });
-});
+app.use('/quiz', quizRouter);
 
 // ============================================
 // START SERVER
@@ -122,6 +63,7 @@ app.get('/quiz/:id/questions', async (req, res) => {
 
 async function start() {
   await connectMongo();
+  await connectRedis();
 
   app.listen(PORT, () => {
     console.log(`
