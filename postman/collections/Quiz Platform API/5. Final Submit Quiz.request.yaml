@@ -1,0 +1,14 @@
+$kind: http-request
+name: 5. Final Submit Quiz
+url: http://localhost:3000/quiz/{{quiz_id}}/submit
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: text
+  content: |-
+    {
+        "studentId": "postman_student_1",
+        "studentName": "Postman Tester"
+    }
+order: 5000

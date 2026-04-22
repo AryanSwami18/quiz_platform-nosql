@@ -1,0 +1,5 @@
+$kind: http-request
+name: "Analytics: Difficulty Analysis"
+url: http://localhost:3000/analytics/difficulty-analysis
+method: GET
+order: 8000

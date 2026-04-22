@@ -1,0 +1,11 @@
+# Use this workspace to collaborate
+workspace:
+  id: fd4373b3-2c7d-4c1e-8b98-c36a2c2b45f9
+
+localResources:
+  collections:
+    - ../quiz-platform-postman-collection.json
+
+cloudResources:
+  collections:
+    ../postman/collections/Quiz Platform API: 68f962c3-1fed-4b1e-bb67-88dfcc7e7118

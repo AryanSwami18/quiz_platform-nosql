@@ -1,0 +1,15 @@
+$kind: http-request
+name: 2. Start Quiz
+description: Replace {{quiz_id}} with the ID returned from the first request.
+url: http://localhost:3000/quiz/{{quiz_id}}/start
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: text
+  content: |-
+    {
+        "studentId": "postman_student_1",
+        "studentName": "Postman Tester"
+    }
+order: 2000

@@ -1,0 +1,7 @@
+$kind: http-request
+name: 4. Get Leaderboard
+url: http://localhost:3000/quiz/{{quiz_id}}/leaderboard?student_id=postman_student_1
+method: GET
+queryParams:
+  student_id: postman_student_1
+order: 4000

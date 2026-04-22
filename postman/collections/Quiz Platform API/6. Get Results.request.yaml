@@ -1,0 +1,8 @@
+$kind: http-request
+name: 6. Get Results
+description: Replace {{attempt_id}} with the attempt_id returned from the Submit request.
+url: http://localhost:3000/quiz/{{quiz_id}}/results?attempt_id={{attempt_id}}
+method: GET
+queryParams:
+  attempt_id: "{{attempt_id}}"
+order: 6000

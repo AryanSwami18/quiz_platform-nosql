@@ -1,0 +1,5 @@
+$kind: http-request
+name: "Analytics: Top Students"
+url: http://localhost:3000/analytics/top-students
+method: GET
+order: 7000

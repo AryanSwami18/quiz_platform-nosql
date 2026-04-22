@@ -1,0 +1,16 @@
+$kind: http-request
+name: 3. Submit Answer
+description: Replace {{question_id}} with an ID returned in the start quiz response. Answer is an index for MCQs (e.g. 1).
+url: http://localhost:3000/quiz/69e788e91195dcf392c160bc/answer
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: text
+  content: |-
+    {
+        "studentId": "postman_student_1",
+        "questionId": "{{question_id}}",
+        "answer": 1
+    }
+order: 3000
