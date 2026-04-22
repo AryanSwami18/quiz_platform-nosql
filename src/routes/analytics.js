@@ -1,165 +1,177 @@
 import express from 'express';
-import { MongoClient, ObjectId } from 'mongodb';
-import dotenv from 'dotenv';
-
-dotenv.config();
+import { ObjectId } from 'mongodb';
+import { getDb } from '../db/mongo.js';
 
 const router = express.Router();
-const uri = process.env.MONGO_URI || 'mongodb://root:rootpassword@localhost:27017/quiz_platform?authSource=admin';
-const client = new MongoClient(uri);
 
-// Connect once for the router (or you could reuse the index.js connection)
-// For simplicity and decoupling here, we ensure it's connected
-async function getDb() {
-    if (!client.topology || !client.topology.isConnected()) {
-        await client.connect();
-    }
-    return client.db('quiz_platform');
+async function runAggregateWithExplain(collection, pipeline) {
+  const results = await collection.aggregate(pipeline).toArray();
+  const explain = await collection.aggregate(pipeline).explain('executionStats');
+  return { results, explain };
 }
 
-// 1. Average Score per Quiz
 router.get('/avg-score/:quizId', async (req, res) => {
-    try {
-        const db = await getDb();
-        const quizId = new ObjectId(req.params.quizId);
-        
-        const pipeline = [
-            { $match: { quiz_id: quizId } },
-            { 
-                $group: { 
-                    _id: "$quiz_id", 
-                    averageScore: { $avg: "$score" },
-                    totalAttempts: { $sum: 1 }
-                } 
-            }
-        ];
+  try {
+    const db = await getDb();
+    const quizId = new ObjectId(req.params.quizId);
+    const pipeline = [
+      { $match: { quiz_id: quizId } },
+      {
+        $group: {
+          _id: '$quiz_id',
+          averageScore: { $avg: '$score' },
+          averagePercentage: { $avg: '$percentage' },
+          bestScore: { $max: '$score' },
+          totalAttempts: { $sum: 1 },
+        },
+      },
+    ];
 
-        const explain = await db.collection('quiz_attempts').aggregate(pipeline).explain();
-        const results = await db.collection('quiz_attempts').aggregate(pipeline).toArray();
-        
-        res.json({ results, explain });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    res.json(await runAggregateWithExplain(db.collection('quiz_attempts'), pipeline));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// 2. Top 5 Students Overall (across all quizzes)
-router.get('/top-students', async (req, res) => {
-    try {
-        const db = await getDb();
-        
-        const pipeline = [
-            { 
-                $group: {
-                    _id: "$student_id",
-                    studentName: { $first: "$student_name" },
-                    totalScore: { $sum: "$score" },
-                    quizzesTaken: { $addToSet: "$quiz_id" }
-                }
-            },
-            { $sort: { totalScore: -1 } },
-            { $limit: 5 }
-        ];
+router.get('/top-students', async (_req, res) => {
+  try {
+    const db = await getDb();
+    const pipeline = [
+      {
+        $group: {
+          _id: '$student_id',
+          studentName: { $first: '$student_name' },
+          totalScore: { $sum: '$score' },
+          averagePercentage: { $avg: '$percentage' },
+          quizzesTaken: { $addToSet: '$quiz_id' },
+        },
+      },
+      {
+        $project: {
+          _id: 1,
+          studentName: 1,
+          totalScore: 1,
+          averagePercentage: 1,
+          quizzesTaken: { $size: '$quizzesTaken' },
+        },
+      },
+      { $sort: { totalScore: -1, averagePercentage: -1 } },
+      { $limit: 5 },
+    ];
 
-        const explain = await db.collection('quiz_attempts').aggregate(pipeline).explain();
-        const results = await db.collection('quiz_attempts').aggregate(pipeline).toArray();
-        
-        res.json({ results, explain });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    res.json(await runAggregateWithExplain(db.collection('quiz_attempts'), pipeline));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// 3. Question Difficulty Analysis (<30% correct rate)
-router.get('/difficulty-analysis', async (req, res) => {
-    try {
-        const db = await getDb();
-        
-        const pipeline = [
-            { $unwind: "$answers" },
-            { 
-                $group: {
-                    _id: "$answers.question_id",
-                    totalAttempts: { $sum: 1 },
-                    correctAttempts: { 
-                        $sum: { $cond: ["$answers.is_correct", 1, 0] } 
-                    }
-                }
-            },
-            {
-                $project: {
-                    _id: 1,
-                    totalAttempts: 1,
-                    correctAttempts: 1,
-                    correctRate: { $divide: ["$correctAttempts", "$totalAttempts"] }
-                }
-            },
-            { $match: { correctRate: { $lt: 0.3 } } }, // < 30% correct rate
-            {
-                $lookup: {
-                    from: "questions",
-                    localField: "_id",
-                    foreignField: "_id",
-                    as: "questionDetails"
-                }
-            },
-            { $unwind: "$questionDetails" }
-        ];
+router.get('/difficulty-analysis', async (_req, res) => {
+  try {
+    const db = await getDb();
+    const pipeline = [
+      { $unwind: '$answers' },
+      {
+        $group: {
+          _id: '$answers.question_id',
+          totalAttempts: { $sum: 1 },
+          correctAttempts: {
+            $sum: { $cond: ['$answers.is_correct', 1, 0] },
+          },
+        },
+      },
+      {
+        $project: {
+          totalAttempts: 1,
+          correctAttempts: 1,
+          correctRate: { $divide: ['$correctAttempts', '$totalAttempts'] },
+        },
+      },
+      { $match: { correctRate: { $lt: 0.3 } } },
+      {
+        $lookup: {
+          from: 'questions',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'question',
+        },
+      },
+      { $unwind: '$question' },
+      {
+        $project: {
+          question_id: '$_id',
+          question_text: '$question.question_text',
+          subject: '$question.subject',
+          difficulty: '$question.difficulty',
+          totalAttempts: 1,
+          correctAttempts: 1,
+          correctRate: 1,
+        },
+      },
+      { $sort: { correctRate: 1, totalAttempts: -1 } },
+    ];
 
-        const explain = await db.collection('quiz_attempts').aggregate(pipeline).explain();
-        const results = await db.collection('quiz_attempts').aggregate(pipeline).toArray();
-        
-        res.json({ results, explain });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    res.json(await runAggregateWithExplain(db.collection('quiz_attempts'), pipeline));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// 4. Subject-wise Comparison
-router.get('/subject-comparison', async (req, res) => {
-    try {
-        const db = await getDb();
-        
-        const pipeline = [
-            { $unwind: "$answers" },
-            {
-                $lookup: {
-                    from: "questions",
-                    localField: "answers.question_id",
-                    foreignField: "_id",
-                    as: "questionDetails"
-                }
-            },
-            { $unwind: "$questionDetails" },
-            {
-                $group: {
-                    _id: "$questionDetails.subject",
-                    totalAttempts: { $sum: 1 },
-                    correctAttempts: { 
-                        $sum: { $cond: ["$answers.is_correct", 1, 0] } 
-                    },
-                    totalPointsEarned: { $sum: "$answers.points_earned" }
-                }
-            },
-            {
-                $project: {
-                    _id: 1,
-                    subject: "$_id",
-                    totalAttempts: 1,
-                    correctRate: { $divide: ["$correctAttempts", "$totalAttempts"] },
-                    averagePoints: { $divide: ["$totalPointsEarned", "$totalAttempts"] }
-                }
-            },
-            { $sort: { correctRate: -1 } }
-        ];
+router.get('/subject-comparison', async (_req, res) => {
+  try {
+    const db = await getDb();
+    const pipeline = [
+      { $unwind: '$answers' },
+      {
+        $lookup: {
+          from: 'questions',
+          localField: 'answers.question_id',
+          foreignField: '_id',
+          as: 'question',
+        },
+      },
+      { $unwind: '$question' },
+      {
+        $group: {
+          _id: '$question.subject',
+          totalAttempts: { $sum: 1 },
+          correctAttempts: {
+            $sum: { $cond: ['$answers.is_correct', 1, 0] },
+          },
+          averagePoints: { $avg: '$answers.points_earned' },
+        },
+      },
+      {
+        $project: {
+          subject: '$_id',
+          totalAttempts: 1,
+          correctRate: { $divide: ['$correctAttempts', '$totalAttempts'] },
+          averagePoints: 1,
+        },
+      },
+      { $sort: { correctRate: -1, totalAttempts: -1 } },
+    ];
 
-        const explain = await db.collection('quiz_attempts').aggregate(pipeline).explain();
-        const results = await db.collection('quiz_attempts').aggregate(pipeline).toArray();
-        
-        res.json({ results, explain });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    res.json(await runAggregateWithExplain(db.collection('quiz_attempts'), pipeline));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/index-proof/:quizId', async (req, res) => {
+  try {
+    const db = await getDb();
+    const quizId = new ObjectId(req.params.quizId);
+    const explain = await db
+      .collection('quiz_attempts')
+      .find({ quiz_id: quizId })
+      .sort({ score: -1 })
+      .limit(5)
+      .explain('executionStats');
+
+    res.json(explain);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 export default router;

@@ -1,72 +1,59 @@
-// MongoDB initialization script
-// This runs automatically when the container starts
-
 const db = db.getSiblingDB('quiz_platform');
 
-// Drop existing collections if needed (comment out after initial setup)
-// db.questions.drop();
-// db.quizzes.drop();
-// db.quiz_attempts.drop();
+function ensureCollection(name, options) {
+  const exists = db.getCollectionInfos({ name }).length > 0;
+  if (!exists) {
+    db.createCollection(name, options);
+    return;
+  }
 
-// ============================================
-// 1. QUESTIONS COLLECTION (Attribute Pattern)
-// ============================================
-db.createCollection('questions', {
+  db.runCommand({
+    collMod: name,
+    validator: options.validator,
+  });
+}
+
+ensureCollection('questions', {
   validator: {
     $jsonSchema: {
       bsonType: 'object',
-      required: ['quiz_id', 'question_text', 'type', 'difficulty'],
+      required: ['quiz_id', 'question_text', 'type', 'difficulty', 'subject'],
       properties: {
         _id: { bsonType: 'objectId' },
-        quiz_id: { bsonType: 'objectId', description: 'Reference to quiz' },
-        question_text: { bsonType: 'string', description: 'The question content' },
-        type: { 
-          enum: ['MCQ', 'TRUE_FALSE', 'CODING'],
-          description: 'Question type for attribute pattern'
-        },
-        difficulty: {
-          enum: ['easy', 'medium', 'hard'],
-          description: 'Question difficulty level'
-        },
-        subject: { bsonType: 'string', description: 'Subject/topic' },
-        
-        // MCQ-specific fields (only present if type === 'MCQ')
-        options: { 
+        quiz_id: { bsonType: 'objectId' },
+        order: { bsonType: ['int', 'long'] },
+        question_text: { bsonType: 'string' },
+        type: { enum: ['MCQ', 'TRUE_FALSE', 'CODING'] },
+        difficulty: { enum: ['easy', 'medium', 'hard'] },
+        subject: { bsonType: 'string' },
+        points: { bsonType: ['int', 'long'] },
+        options: {
           bsonType: 'array',
-          description: 'Answer options for MCQ',
-          items: { bsonType: 'string' }
+          items: { bsonType: 'string' },
         },
-        correct_option: { bsonType: 'int', description: 'Index of correct option' },
-        
-        // TRUE_FALSE-specific (minimal, no extra fields needed)
-        is_true: { bsonType: 'bool', description: 'Correct answer for true/false' },
-        
-        // CODING-specific fields
+        option_count: { bsonType: ['int', 'long'] },
+        correct_option: { bsonType: ['int', 'long'] },
+        is_true: { bsonType: 'bool' },
         test_cases: {
           bsonType: 'array',
-          description: 'Test cases for coding questions',
           items: {
             bsonType: 'object',
+            required: ['input', 'expected_output'],
             properties: {
               input: { bsonType: 'string' },
-              expected_output: { bsonType: 'string' }
-            }
-          }
+              expected_output: { bsonType: 'string' },
+            },
+          },
         },
-        language: { bsonType: 'string', description: 'Programming language' },
-        
-        // Metadata
+        language: { bsonType: 'string' },
         created_at: { bsonType: 'date' },
-        updated_at: { bsonType: 'date' }
-      }
-    }
-  }
+        updated_at: { bsonType: 'date' },
+      },
+    },
+  },
 });
 
-// ============================================
-// 2. QUIZZES COLLECTION
-// ============================================
-db.createCollection('quizzes', {
+ensureCollection('quizzes', {
   validator: {
     $jsonSchema: {
       bsonType: 'object',
@@ -78,92 +65,75 @@ db.createCollection('quizzes', {
         question_ids: {
           bsonType: 'array',
           items: { bsonType: 'objectId' },
-          description: 'Reference to question documents'
         },
-        duration_minutes: { bsonType: 'int', description: 'Quiz duration in minutes' },
-        passing_score: { bsonType: 'int', description: 'Score needed to pass (0-100)' },
-        total_points: { bsonType: 'int', description: 'Sum of all question points' },
-        created_by: { bsonType: 'string', description: 'Faculty ID' },
-        status: {
-          enum: ['draft', 'published', 'archived'],
-          default: 'draft'
+        question_count: { bsonType: ['int', 'long'] },
+        duration_minutes: { bsonType: ['int', 'long'] },
+        passing_score: { bsonType: ['int', 'long'] },
+        total_points: { bsonType: ['int', 'long'] },
+        created_by: { bsonType: 'string' },
+        subjects: {
+          bsonType: 'array',
+          items: { bsonType: 'string' },
         },
+        status: { enum: ['draft', 'published', 'archived'] },
         created_at: { bsonType: 'date' },
-        updated_at: { bsonType: 'date' }
-      }
-    }
-  }
+        updated_at: { bsonType: 'date' },
+      },
+    },
+  },
 });
 
-// ============================================
-// 3. QUIZ_ATTEMPTS COLLECTION (Permanent History)
-// ============================================
-db.createCollection('quiz_attempts', {
+ensureCollection('quiz_attempts', {
   validator: {
     $jsonSchema: {
       bsonType: 'object',
-      required: ['quiz_id', 'student_id', 'started_at'],
+      required: ['quiz_id', 'student_id', 'started_at', 'submitted_at'],
       properties: {
         _id: { bsonType: 'objectId' },
         quiz_id: { bsonType: 'objectId' },
-        student_id: { bsonType: 'string', description: 'Student identifier' },
+        quiz_title: { bsonType: 'string' },
+        student_id: { bsonType: 'string' },
         student_name: { bsonType: 'string' },
-        
-        // Attempt timing
         started_at: { bsonType: 'date' },
         submitted_at: { bsonType: 'date' },
-        time_taken_seconds: { bsonType: 'int' },
-        
-        // Answers: array of {question_id, answer, is_correct}
+        time_taken_seconds: { bsonType: ['int', 'long'] },
+        score: { bsonType: ['int', 'long', 'double'] },
+        percentage: { bsonType: ['double', 'int', 'long'] },
+        passed: { bsonType: 'bool' },
+        rank: { bsonType: ['int', 'long', 'null'] },
+        submission_source: { bsonType: 'string' },
         answers: {
           bsonType: 'array',
           items: {
             bsonType: 'object',
+            required: ['question_id', 'answer', 'is_correct', 'points_earned'],
             properties: {
               question_id: { bsonType: 'objectId' },
+              question_text: { bsonType: 'string' },
+              subject: { bsonType: 'string' },
+              type: { bsonType: 'string' },
               answer: { bsonType: 'string' },
+              correct_answer: { bsonType: ['string', 'bool', 'null'] },
               is_correct: { bsonType: 'bool' },
-              points_earned: { bsonType: 'int' }
-            }
-          }
+              points_earned: { bsonType: ['int', 'long', 'double'] },
+            },
+          },
         },
-        
-        // Scoring
-        score: { bsonType: 'int', description: 'Total points earned' },
-        percentage: { bsonType: 'double', description: 'Percentage score (0-100)' },
-        passed: { bsonType: 'bool' },
-        
-        // Metadata
-        ip_address: { bsonType: 'string' }
-      }
-    }
-  }
+      },
+    },
+  },
 });
 
-// ============================================
-// 4. CREATE INDEXES
-// ============================================
-
-// Questions indexes
-db.questions.createIndex({ quiz_id: 1 });
+db.questions.createIndex({ quiz_id: 1, order: 1 });
 db.questions.createIndex({ type: 1, difficulty: 1 });
 db.questions.createIndex({ subject: 1 });
 
-// Quizzes indexes
-db.quizzes.createIndex({ created_by: 1 });
-db.quizzes.createIndex({ status: 1 });
-db.quizzes.createIndex({ created_at: -1 });
+db.quizzes.createIndex({ status: 1, created_at: -1 });
+db.quizzes.createIndex({ created_by: 1, created_at: -1 });
 
-// Quiz attempts indexes (CRITICAL for aggregations)
 db.quiz_attempts.createIndex({ quiz_id: 1, score: -1 });
 db.quiz_attempts.createIndex({ student_id: 1, quiz_id: 1 });
 db.quiz_attempts.createIndex({ submitted_at: -1 });
-db.quiz_attempts.createIndex({ quiz_id: 1, submitted_at: -1 });
-
-// Compound index for leaderboard queries
 db.quiz_attempts.createIndex({ quiz_id: 1, score: -1, submitted_at: -1 });
 
-console.log('✓ Collections created with schemas');
-console.log('✓ Indexes created');
-console.log('✓ MongoDB initialization complete');
-
+print('MongoDB schema and indexes are ready');

@@ -1,253 +1,361 @@
 import express from 'express';
-import { MongoClient, ObjectId } from 'mongodb';
-import { initSession, getSession, updateSessionAnswer, deleteSession } from '../redis/session.js';
-import { incrementScore, getLeaderboard } from '../redis/leaderboard.js';
-import { lockAnswer, unlockAnswer } from '../redis/answers.js';
+import { ObjectId } from 'mongodb';
+import { getDb } from '../db/mongo.js';
+import {
+  getSession,
+  getSessionTtl,
+  initSession,
+  updateSessionAnswer,
+} from '../redis/session.js';
+import { getLeaderboard, incrementScore } from '../redis/leaderboard.js';
+import { lockAnswer } from '../redis/answers.js';
 import { quizEmitter, EVENTS } from '../utils/emitter.js';
-import dotenv from 'dotenv';
-
-dotenv.config();
+import {
+  persistQuizAttempt,
+  scheduleSessionExpiration,
+} from '../services/attempts.js';
 
 const router = express.Router();
-const uri = process.env.MONGO_URI || 'mongodb://root:rootpassword@localhost:27017/quiz_platform?authSource=admin';
-const client = new MongoClient(uri);
 
-async function getDb() {
-    if (!client.topology || !client.topology.isConnected()) {
-        await client.connect();
-    }
-    return client.db('quiz_platform');
+function stripQuestionForClient(question) {
+  const sanitized = { ...question };
+  delete sanitized.correct_option;
+  delete sanitized.is_true;
+  delete sanitized.test_cases;
+  return sanitized;
 }
 
-// Helper to remove correct answers from question payload
-const stripAnswers = (question) => {
-    const q = { ...question };
-    delete q.correct_option;
-    delete q.is_true;
-    // For coding questions, we might want to hide test cases or at least expected outputs, but we'll keep it simple for now
-    return q;
-};
+function evaluateAnswer(question, answer) {
+  if (question.type === 'MCQ') {
+    return Number(answer) === Number(question.correct_option);
+  }
 
-// 0. Get Active Quiz
+  if (question.type === 'TRUE_FALSE') {
+    return String(answer) === String(question.is_true);
+  }
+
+  if (question.type === 'CODING') {
+    const normalized = String(answer || '').trim().toLowerCase();
+    const keywords = ['function', 'return', '=>', 'def ', 'public static'];
+    return normalized.length > 0 && keywords.some((keyword) => normalized.includes(keyword));
+  }
+
+  return false;
+}
+
+async function getQuizWithQuestions(db, quizId) {
+  const quiz = await db.collection('quizzes').findOne({ _id: new ObjectId(quizId) });
+  if (!quiz) {
+    return null;
+  }
+
+  const questions = quiz.question_ids?.length
+    ? await db
+        .collection('questions')
+        .find({ _id: { $in: quiz.question_ids } })
+        .sort({ order: 1, created_at: 1 })
+        .toArray()
+    : [];
+
+  return { quiz, questions };
+}
+
+router.get('/', async (req, res) => {
+  try {
+    const db = await getDb();
+    const status = req.query.status || 'published';
+    const quizzes = await db
+      .collection('quizzes')
+      .find({ status })
+      .project({
+        title: 1,
+        description: 1,
+        duration_minutes: 1,
+        total_points: 1,
+        passing_score: 1,
+        created_by: 1,
+        status: 1,
+        question_ids: 1,
+        subjects: 1,
+        created_at: 1,
+      })
+      .sort({ created_at: -1 })
+      .toArray();
+
+    res.json(
+      quizzes.map((quiz) => ({
+        ...quiz,
+        question_count: quiz.question_ids?.length || 0,
+      })),
+    );
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.get('/active', async (req, res) => {
-    try {
-        const db = await getDb();
-        const quiz = await db.collection('quizzes').findOne({ status: 'published' });
-        if (!quiz) return res.status(404).json({ error: 'No active quiz found' });
-        res.json({ id: quiz._id, title: quiz.title, duration_minutes: quiz.duration_minutes });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+  try {
+    const db = await getDb();
+    const quiz = await db
+      .collection('quizzes')
+      .find({ status: 'published' })
+      .sort({ created_at: -1 })
+      .limit(1)
+      .next();
+
+    if (!quiz) {
+      return res.status(404).json({ error: 'No published quiz found' });
     }
+
+    res.json({
+      id: quiz._id,
+      title: quiz.title,
+      duration_minutes: quiz.duration_minutes,
+      question_count: quiz.question_ids?.length || 0,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// 1. Start Quiz
+router.get('/:id', async (req, res) => {
+  try {
+    const db = await getDb();
+    const payload = await getQuizWithQuestions(db, req.params.id);
+
+    if (!payload) {
+      return res.status(404).json({ error: 'Quiz not found' });
+    }
+
+    const { quiz, questions } = payload;
+    res.json({
+      ...quiz,
+      question_count: questions.length,
+      questions: questions.map(stripQuestionForClient),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.post('/:id/start', async (req, res) => {
-    try {
-        const db = await getDb();
-        const quizId = req.params.id;
-        const { studentId, studentName } = req.body;
+  try {
+    const db = await getDb();
+    const { id: quizId } = req.params;
+    const { studentId, studentName } = req.body;
 
-        if (!studentId || !studentName) {
-            return res.status(400).json({ error: 'studentId and studentName required' });
-        }
-
-        const quiz = await db.collection('quizzes').findOne({ _id: new ObjectId(quizId) });
-        if (!quiz) return res.status(404).json({ error: 'Quiz not found' });
-
-        const sessionCreated = await initSession(quizId, studentId, quiz.duration_minutes);
-        if (!sessionCreated) {
-            return res.status(400).json({ error: 'Session already active for this student' });
-        }
-
-        const questions = await db.collection('questions').find({ quiz_id: new ObjectId(quizId) }).toArray();
-
-        res.json({
-            message: 'Quiz started successfully',
-            sessionId: `${quizId}:${studentId}`,
-            duration_minutes: quiz.duration_minutes,
-            questions: questions.map(stripAnswers)
-        });
-
-        // Emit leaderboard update to trigger initial 0 points display for connected clients
-        quizEmitter.emit(EVENTS.LEADERBOARD_UPDATE, quizId);
-
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+    if (!studentId || !studentName) {
+      return res.status(400).json({ error: 'studentId and studentName are required' });
     }
+
+    const payload = await getQuizWithQuestions(db, quizId);
+    if (!payload) {
+      return res.status(404).json({ error: 'Quiz not found' });
+    }
+
+    const { quiz, questions } = payload;
+    if (quiz.status !== 'published') {
+      return res.status(400).json({ error: 'Quiz is not currently published' });
+    }
+
+    const existingAttempt = await db.collection('quiz_attempts').findOne(
+      { quiz_id: quiz._id, student_id: studentId },
+      { sort: { submitted_at: -1 } },
+    );
+
+    if (existingAttempt) {
+      return res.status(400).json({ error: 'This student has already submitted this quiz' });
+    }
+
+    const sessionCreated = await initSession(quizId, studentId, quiz.duration_minutes);
+    if (!sessionCreated) {
+      return res.status(400).json({ error: 'Session already active for this student' });
+    }
+
+    await scheduleSessionExpiration(quizId, studentId, sessionCreated.expiresAt);
+    quizEmitter.emit(EVENTS.LEADERBOARD_UPDATE, quizId);
+
+    res.json({
+      message: 'Quiz started successfully',
+      sessionId: `${quizId}:${studentId}`,
+      duration_minutes: quiz.duration_minutes,
+      ttl_seconds: sessionCreated.expiresInSeconds,
+      quiz: {
+        id: quiz._id,
+        title: quiz.title,
+        description: quiz.description,
+        total_points: quiz.total_points,
+      },
+      questions: questions.map(stripQuestionForClient),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// 2. Submit Answer
+router.get('/:id/session', async (req, res) => {
+  try {
+    const { id: quizId } = req.params;
+    const studentId = req.query.student_id;
+
+    if (!studentId) {
+      return res.status(400).json({ error: 'student_id is required' });
+    }
+
+    const session = await getSession(quizId, studentId);
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    const ttlSeconds = await getSessionTtl(quizId, studentId);
+    res.json({
+      startedAt: session.startedAt,
+      score: session.score,
+      answers: session.answers,
+      ttl_seconds: Math.max(ttlSeconds, 0),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.post('/:id/answer', async (req, res) => {
-    try {
-        const db = await getDb();
-        const quizId = req.params.id;
-        const { studentId, questionId, answer } = req.body;
+  try {
+    const db = await getDb();
+    const { id: quizId } = req.params;
+    const { studentId, questionId, answer } = req.body;
 
-        if (!studentId || !questionId || answer === undefined) {
-            return res.status(400).json({ error: 'studentId, questionId, answer required' });
-        }
-
-        // Check if session exists (TTL hasn't expired)
-        const session = await getSession(quizId, studentId);
-        if (!session) {
-            return res.status(400).json({ error: 'Quiz session expired or not started' });
-        }
-
-        // Spam prevention: atomic lock
-        const locked = await lockAnswer(quizId, studentId, questionId);
-        if (!locked) {
-            return res.status(400).json({ error: 'Answer already submitted for this question' });
-        }
-
-        // Validate answer
-        const question = await db.collection('questions').findOne({ _id: new ObjectId(questionId) });
-        if (!question) {
-            // Revert lock since question is invalid
-            await unlockAnswer(quizId, studentId, questionId);
-            return res.status(404).json({ error: 'Question not found' });
-        }
-
-        let isCorrect = false;
-        let pointsEarned = 0;
-
-        if (question.type === 'MCQ') {
-            isCorrect = parseInt(answer) === question.correct_option;
-        } else if (question.type === 'TRUE_FALSE') {
-            isCorrect = Boolean(answer) === question.is_true;
-        } else if (question.type === 'CODING') {
-            // Mocking execution: simply say it's correct for now
-            isCorrect = true; 
-        }
-
-        if (isCorrect) {
-            pointsEarned = 10; // Fixed 10 points for simplicity, or use question.points
-            // Update leaderboard
-            await incrementScore(quizId, studentId, pointsEarned);
-        }
-
-        // Update session
-        const answerData = { answer, is_correct: isCorrect, points_earned: pointsEarned };
-        await updateSessionAnswer(quizId, studentId, questionId, answerData, pointsEarned);
-
-        // Broadcast to all SSE clients that this quiz's leaderboard has changed!
-        if (isCorrect) {
-            quizEmitter.emit(EVENTS.LEADERBOARD_UPDATE, quizId);
-        }
-
-        const currentLeaderboard = await getLeaderboard(quizId, studentId);
-
-        res.json({
-            message: 'Answer recorded',
-            correct: isCorrect,
-            points_earned: pointsEarned,
-            your_rank: currentLeaderboard.yourRank
-        });
-
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+    if (!studentId || !questionId || answer === undefined) {
+      return res.status(400).json({ error: 'studentId, questionId and answer are required' });
     }
+
+    const session = await getSession(quizId, studentId);
+    if (!session) {
+      const { attempt } =
+        (await persistQuizAttempt({
+          quizId,
+          studentId,
+          studentName: studentId,
+          submissionSource: 'ttl-expiry',
+        }).catch(() => ({ attempt: null }))) || {};
+
+      return res.status(400).json({
+        error: 'Quiz session expired or not started',
+        attempt_id: attempt?._id || null,
+      });
+    }
+
+    const ttlSeconds = Math.max(session.ttlSeconds || 0, 1);
+    const locked = await lockAnswer(quizId, studentId, questionId, ttlSeconds);
+    if (!locked) {
+      return res.status(400).json({ error: 'Answer already submitted for this question' });
+    }
+
+    const question = await db.collection('questions').findOne({ _id: new ObjectId(questionId) });
+    if (!question) {
+      return res.status(404).json({ error: 'Question not found' });
+    }
+
+    const isCorrect = evaluateAnswer(question, answer);
+    const pointsEarned = isCorrect ? Number(question.points || 10) : 0;
+    await updateSessionAnswer(
+      quizId,
+      studentId,
+      questionId,
+      {
+        answer,
+        is_correct: isCorrect,
+        points_earned: pointsEarned,
+      },
+      pointsEarned,
+    );
+
+    if (pointsEarned > 0) {
+      await incrementScore(quizId, studentId, pointsEarned);
+      quizEmitter.emit(EVENTS.LEADERBOARD_UPDATE, quizId);
+    }
+
+    const currentLeaderboard = await getLeaderboard(quizId, studentId);
+    res.json({
+      message: 'Answer recorded',
+      correct: isCorrect,
+      points_earned: pointsEarned,
+      your_rank: currentLeaderboard.yourRank,
+      your_score: currentLeaderboard.yourScore,
+      ttl_seconds: session.ttlSeconds,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// 3. Get Leaderboard
 router.get('/:id/leaderboard', async (req, res) => {
-    try {
-        const quizId = req.params.id;
-        const studentId = req.query.student_id;
-
-        const leaderboard = await getLeaderboard(quizId, studentId || 'anonymous');
-        
-        res.json(leaderboard);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+  try {
+    const leaderboard = await getLeaderboard(req.params.id, req.query.student_id || 'anonymous');
+    res.json(leaderboard);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// 4. Submit Quiz (Manual or Auto on TTL)
 router.post('/:id/submit', async (req, res) => {
-    try {
-        const db = await getDb();
-        const quizId = req.params.id;
-        const { studentId, studentName } = req.body;
+  try {
+    const { id: quizId } = req.params;
+    const { studentId, studentName } = req.body;
 
-        if (!studentId || !studentName) {
-            return res.status(400).json({ error: 'studentId and studentName required' });
-        }
-
-        const session = await getSession(quizId, studentId);
-        let score = 0;
-        let answersObj = {};
-
-        if (session) {
-            score = session.score;
-            answersObj = session.answers;
-            await deleteSession(quizId, studentId);
-            // Optionally: cleanup locks for this student, but Redis expires them eventually if we set TTL on locks
-        } else {
-            // Session expired (TTL triggered auto-submit equivalent, meaning we might not have the session state easily if we don't catch expired events).
-            // For a robust system, we would listen to Redis Keyspace Notifications for expirations.
-            // But since this endpoint might be called by the frontend on TTL expiry, we can just say session is closed.
-            // If they answered questions, the score is already in the leaderboard.
-            const lb = await getLeaderboard(quizId, studentId);
-            score = lb.yourScore || 0;
-        }
-
-        const answersArray = Object.keys(answersObj).map(qId => ({
-            question_id: new ObjectId(qId),
-            answer: answersObj[qId].answer,
-            is_correct: answersObj[qId].is_correct,
-            points_earned: answersObj[qId].points_earned
-        }));
-
-        const quiz = await db.collection('quizzes').findOne({ _id: new ObjectId(quizId) });
-
-        const attempt = {
-            quiz_id: new ObjectId(quizId),
-            student_id: studentId,
-            student_name: studentName,
-            started_at: session ? new Date(session.startedAt) : new Date(),
-            submitted_at: new Date(),
-            answers: answersArray,
-            score: score,
-            percentage: quiz ? (score / quiz.total_points) * 100 : 0,
-            passed: quiz ? score >= quiz.passing_score : false
-        };
-
-        const result = await db.collection('quiz_attempts').insertOne(attempt);
-
-        const lbInfo = await getLeaderboard(quizId, studentId);
-
-        res.json({
-            message: 'Quiz submitted and saved to history successfully',
-            attempt_id: result.insertedId,
-            final_score: score,
-            rank: lbInfo.yourRank
-        });
-
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+    if (!studentId || !studentName) {
+      return res.status(400).json({ error: 'studentId and studentName are required' });
     }
+
+    const { attempt, alreadySubmitted } = await persistQuizAttempt({
+      quizId,
+      studentId,
+      studentName,
+      submissionSource: 'manual',
+    });
+
+    res.json({
+      message: alreadySubmitted ? 'Quiz already submitted' : 'Quiz submitted successfully',
+      attempt_id: attempt._id,
+      final_score: attempt.score,
+      rank: attempt.rank,
+      already_submitted: alreadySubmitted,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// 5. Results
 router.get('/:id/results', async (req, res) => {
-    try {
-        const db = await getDb();
-        const { attempt_id } = req.query;
+  try {
+    const db = await getDb();
+    const { attempt_id: attemptId } = req.query;
 
-        if (!attempt_id) {
-            return res.status(400).json({ error: 'attempt_id required' });
-        }
-
-        const attempt = await db.collection('quiz_attempts').findOne({ _id: new ObjectId(attempt_id) });
-        if (!attempt) {
-            return res.status(404).json({ error: 'Attempt not found' });
-        }
-
-        res.json(attempt);
-
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+    if (!attemptId) {
+      return res.status(400).json({ error: 'attempt_id is required' });
     }
+
+    const attempt = await db.collection('quiz_attempts').findOne({ _id: new ObjectId(attemptId) });
+    if (!attempt) {
+      return res.status(404).json({ error: 'Attempt not found' });
+    }
+
+    const betterAttempts = await db.collection('quiz_attempts').countDocuments({
+      quiz_id: attempt.quiz_id,
+      score: { $gt: attempt.score },
+    });
+    const totalAttempts = await db.collection('quiz_attempts').countDocuments({
+      quiz_id: attempt.quiz_id,
+    });
+
+    res.json({
+      ...attempt,
+      rank: betterAttempts + 1,
+      total_attempts: totalAttempts,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 export default router;

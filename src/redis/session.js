@@ -1,7 +1,8 @@
 import redisClient from '../db/redis.js';
 
 export const sessionKeys = {
-    getKey: (quizId, studentId) => `session:${quizId}:${studentId}`
+    getKey: (quizId, studentId) => `session:${quizId}:${studentId}`,
+    getSnapshotKey: (quizId, studentId) => `session_state:${quizId}:${studentId}`
 };
 
 /**
@@ -12,6 +13,7 @@ export const sessionKeys = {
  */
 export const initSession = async (quizId, studentId, durationMinutes) => {
     const key = sessionKeys.getKey(quizId, studentId);
+    const snapshotKey = sessionKeys.getSnapshotKey(quizId, studentId);
     
     // Check if already exists
     const exists = await redisClient.exists(key);
@@ -21,10 +23,17 @@ export const initSession = async (quizId, studentId, durationMinutes) => {
 
     const durationSeconds = durationMinutes * 60;
     
+    const startedAt = new Date().toISOString();
+
     await redisClient.hSet(key, {
-        startedAt: new Date().toISOString(),
+        startedAt,
         score: 0,
         // Answers will be stored as JSON string in 'answers' field
+        answers: JSON.stringify({})
+    });
+    await redisClient.hSet(snapshotKey, {
+        startedAt,
+        score: 0,
         answers: JSON.stringify({})
     });
     
@@ -35,7 +44,10 @@ export const initSession = async (quizId, studentId, durationMinutes) => {
     const leaderboardKey = `leaderboard:${quizId}`;
     await redisClient.zAdd(leaderboardKey, [{ score: 0, value: studentId }]);
     
-    return true;
+    return {
+        expiresInSeconds: durationSeconds,
+        expiresAt: Date.now() + durationSeconds * 1000
+    };
 };
 
 /**
@@ -45,6 +57,24 @@ export const getSession = async (quizId, studentId) => {
     const key = sessionKeys.getKey(quizId, studentId);
     const session = await redisClient.hGetAll(key);
     
+    if (!session || Object.keys(session).length === 0) {
+        return null;
+    }
+
+    const ttlSeconds = await redisClient.ttl(key);
+
+    return {
+        ...session,
+        answers: JSON.parse(session.answers || '{}'),
+        score: parseInt(session.score || '0', 10),
+        ttlSeconds
+    };
+};
+
+export const getSessionSnapshot = async (quizId, studentId) => {
+    const key = sessionKeys.getSnapshotKey(quizId, studentId);
+    const session = await redisClient.hGetAll(key);
+
     if (!session || Object.keys(session).length === 0) {
         return null;
     }
@@ -61,6 +91,7 @@ export const getSession = async (quizId, studentId) => {
  */
 export const updateSessionAnswer = async (quizId, studentId, questionId, answerData, pointsEarned) => {
     const key = sessionKeys.getKey(quizId, studentId);
+    const snapshotKey = sessionKeys.getSnapshotKey(quizId, studentId);
     
     // Get existing session to modify answers
     const session = await getSession(quizId, studentId);
@@ -73,6 +104,10 @@ export const updateSessionAnswer = async (quizId, studentId, questionId, answerD
         answers: JSON.stringify(session.answers),
         score: session.score
     });
+    await redisClient.hSet(snapshotKey, {
+        answers: JSON.stringify(session.answers),
+        score: session.score
+    });
 
     return session;
 };
@@ -82,5 +117,11 @@ export const updateSessionAnswer = async (quizId, studentId, questionId, answerD
  */
 export const deleteSession = async (quizId, studentId) => {
     const key = sessionKeys.getKey(quizId, studentId);
-    await redisClient.del(key);
+    const snapshotKey = sessionKeys.getSnapshotKey(quizId, studentId);
+    await redisClient.del(key, snapshotKey);
+};
+
+export const getSessionTtl = async (quizId, studentId) => {
+    const key = sessionKeys.getKey(quizId, studentId);
+    return redisClient.ttl(key);
 };
